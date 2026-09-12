@@ -1,13 +1,37 @@
-# Guyane Cultures
+# Guyane Cultures (cloud)
 
-Planificateur agricole simple pour la Guyane francaise.
+Planificateur agricole simple pour la Guyane française — **multi-appareils**, synchronisé via Supabase.
 
+Pensé pour le téléphone, en français, look tropical sombre. Suivez parcelles, préparation du sol, semis, plantations, récoltes, engrais / herbicides, et un planning type Gantt annuel.
 
-Pense pour le telephone, en francais, look tropical sombre.
+**Données dans le cloud** (Supabase Auth + Postgres + RLS). Même compte sur téléphone / tablette / PC = même progression. Isolation multi-tenant par exploitation (`farm_id`).
 
-Suivez parcelles, preparation du sol, semis, plantations, recoltes, engrais / herbicides, et un planning type Gantt annuel.
+## Prérequis
 
-Donnees sur l appareil (localStorage). Sauvegarde dans Plus > Reglages.
+- Node.js 18+ (20 recommandé)
+- Un projet Supabase (voir ci-dessous)
+
+## Configuration Supabase
+
+1. Créez un projet sur [supabase.com](https://supabase.com) (ex. `guyane-cultures`).
+2. Ouvrez **SQL Editor** et exécutez le fichier :
+   `supabase/migrations/001_multi_tenant_farm.sql`
+3. Dans **Authentication → Providers**, gardez **Email** activé (mot de passe).
+4. Dans **Project Settings → API**, copiez :
+   - Project URL → `VITE_SUPABASE_URL`
+   - `anon` / `public` key → `VITE_SUPABASE_ANON_KEY`
+
+```bash
+cp .env.example .env
+# éditez .env avec vos valeurs
+```
+
+Exemple `.env` :
+
+```env
+VITE_SUPABASE_URL=https://xxxxxxxx.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJhbGciOi...
+```
 
 ## Lancer en local
 
@@ -16,7 +40,7 @@ npm install
 npm run dev
 ```
 
-Ouvrez l URL affichee (souvent http://localhost:5173).
+Ouvrez l’URL affichée (souvent http://localhost:5173).
 
 ### Build de production
 
@@ -25,39 +49,49 @@ npm run build
 npm run preview
 ```
 
-Fichiers generes dans dist/.
+Fichiers générés dans `dist/`.
 
-## Demo rapide (2 minutes)
+## Déploiement
 
-1. Lisez le guide d accueil (3 etapes).
-2. Accueil : saison Guyane (chaude sept-mars / fraiche avr-aout).
-3. Cultures > Nouveau semis : plante + parcelle + date = dates auto.
-4. Planning : Gantt (gris prepa, orange semis, vert culture, rouge recolte, bleu engrais, violet herbicide).
-5. Plus : Parcelles, Preparation, Traitements, catalogue, echecs, Reglages.
+Tout hébergeur de sites statiques convient (Vercel, Netlify, GitHub Pages, Cloudflare Pages…).
 
-Des exemples sont charges au premier lancement.
+1. Build : `npm run build`
+2. Publiez le dossier `dist/`
+3. Définissez les variables d’environnement **au build** :
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
 
-## Fonctionnalites
+Sur Vercel / Netlify : ajoutez ces variables dans les réglages du projet, puis redéployez.
 
-- Accueil : saison, stats, raccourcis, prochaines dates
-- Cultures : semis / plantation / recolte, filtres, echecs
-- Planning : Gantt mensuel + liste a venir
-- Plus : Parcelles, preparation, traitements et stock, catalogue, echecs, reglages
-- Catalogue : Salade, Choux, Choux chinois, Bongo/Gombo, Aubergine, Manioc
-- Traitements : NPK, fumiers, Glyphosate, Roundup + custom, stock
-- Annulation : raisons, pertes euros, correctifs, parcelle liberee
+## Première utilisation
 
-## Hors scope (TODO)
+1. Créez un compte (e-mail + mot de passe).
+2. Créez votre exploitation (ferme / jardin) — isolée des autres utilisateurs.
+3. Catalogue de plantes de base déjà chargé (Salade, Choux, Manioc…).
+4. Ajoutez une parcelle → préparation → semis / plantation → suivi Gantt.
 
-- Meteo (API)
-- Bot Discord
-- Sync multi-utilisateurs
-- Export PDF
+## Fonctionnalités
+
+- Connexion / inscription cloud
+- Accueil : saison Guyane, stats, raccourcis, prochaines dates
+- Cultures : semis → plantation → récolte (fil de progression), filtres, échecs
+- Planning : Gantt mensuel + liste à venir
+- Plus : Parcelles, préparation, traitements et stock, catalogue, échecs, réglages
+- Sync cloud : rafraîchir / déconnecter dans Réglages
+- Export / import JSON de secours
+
+## Schéma (multi-tenant)
+
+Tables scopées par `farm_id` + RLS (`is_farm_member`) :
+
+`farms`, `farm_members`, `parcels`, `crop_types`, `preparations`, `nurseries`, `cultures`, `product_stock`, `treatments`, `failures`
+
+Le fil de progression (préparation → pépinière → culture → récolte) reste queryable pour le Gantt via dates et relations (`cultures.nursery_id` → `nurseries`).
 
 ## Technique
 
 - Vite + HTML / CSS / JS
-- localStorage + export/import JSON (Reglages)
+- `@supabase/supabase-js` (Auth e-mail/mot de passe, Postgres, RLS)
 - Mobile-first, 4 onglets (Accueil | Cultures | Planning | Plus)
 
 ## Licence

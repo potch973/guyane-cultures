@@ -1,26 +1,206 @@
 import './style.css';
 import {
-  loadState, saveState, exportJSON, importJSON, resetToSeed, uid,
+  emptyState, exportJSON, parseImportJSON, uid,
   addDays, formatDateFR, formatDateShortFR, MONTHS_SHORT_FR,
   getGuyaneSeason, calcCultureDates, inferPhase,
+  getSession, signUp, signIn, signOut,
+  listUserFarms, createFarm, loadFarmState, syncFarmState, resetFarmToCatalog,
 } from './store.js';
+import { supabaseConfigured, supabase } from './supabase.js';
 import {
   PREP_TYPES, PREP_METHODS, PREP_STATUSES, PARCEL_STATUSES,
   FAILURE_REASONS, SOIL_TYPES, FERTILIZER_PRESETS, HERBICIDE_PRESETS,
 } from './seed.js';
 
-let state = loadState();
+let state = emptyState();
+let session = null;
+let farm = null;
+let syncing = false;
 let tab = 'accueil';
 let plusView = null; // null | parcelles | preparation | traitements | catalogue | reglages | echecs
 let ganttYear = new Date().getFullYear();
 let cultureFilter = 'tous';
+let authMode = 'login'; // login | signup
 
 const content = () => document.getElementById('content');
 const modalRoot = () => document.getElementById('modal-root');
 const headerSub = () => document.getElementById('header-sub');
 
-function persist() {
-  saveState(state);
+async function persist() {
+  if (!farm?.id) return;
+  if (syncing) return;
+  syncing = true;
+  try {
+    await syncFarmState(farm.id, state);
+  } catch (err) {
+    console.error(err);
+    toast(err.message || 'Erreur de synchronisation', true);
+  } finally {
+    syncing = false;
+  }
+}
+
+function setAppShell(visible) {
+  const header = document.querySelector('.app-header');
+  const nav = document.querySelector('.bottom-nav');
+  if (header) header.style.display = visible ? '' : 'none';
+  if (nav) nav.style.display = visible ? '' : 'none';
+}
+
+function renderBoot(msg) {
+  setAppShell(false);
+  content().innerHTML = `
+    <div class="auth-screen">
+      <div class="auth-card">
+        <div class="auth-logo">🌿</div>
+        <h2>Guyane Cultures</h2>
+        <p class="muted">${msg}</p>
+      </div>
+    </div>`;
+}
+
+function renderConfigMissing() {
+  setAppShell(false);
+  content().innerHTML = `
+    <div class="auth-screen">
+      <div class="auth-card">
+        <div class="auth-logo">🌿</div>
+        <h2>Configuration requise</h2>
+        <p class="lead">L'application cloud a besoin de Supabase.</p>
+        <ol class="setup-steps">
+          <li>Créez un projet sur <strong>supabase.com</strong></li>
+          <li>Exécutez le SQL <code>supabase/migrations/001_multi_tenant_farm.sql</code></li>
+          <li>Copiez <code>.env.example</code> → <code>.env</code></li>
+          <li>Renseignez <code>VITE_SUPABASE_URL</code> et <code>VITE_SUPABASE_ANON_KEY</code></li>
+          <li>Relancez <code>npm run dev</code></li>
+        </ol>
+      </div>
+    </div>`;
+}
+
+function renderAuth(errorMsg = '') {
+  setAppShell(false);
+  const isLogin = authMode === 'login';
+  content().innerHTML = `
+    <div class="auth-screen">
+      <div class="auth-card">
+        <div class="auth-logo">🌿</div>
+        <h2>Guyane Cultures</h2>
+        <p class="lead">Tes cultures synchronisées sur tous tes appareils.</p>
+        ${errorMsg ? `<div class="alert alert-warn">${errorMsg}</div>` : ''}
+        <div class="filter-chips" style="justify-content:center">
+          <button type="button" class="chip ${isLogin ? 'active' : ''}" data-auth="login">Connexion</button>
+          <button type="button" class="chip ${!isLogin ? 'active' : ''}" data-auth="signup">Créer un compte</button>
+        </div>
+        <div class="form-group"><label>E-mail</label>
+          <input type="email" id="auth-email" autocomplete="email" placeholder="toi@exemple.com" /></div>
+        <div class="form-group"><label>Mot de passe</label>
+          <input type="password" id="auth-pass" autocomplete="${isLogin ? 'current-password' : 'new-password'}" placeholder="Au moins 6 caractères" /></div>
+        <button type="button" class="btn btn-primary btn-lg" id="auth-submit">
+          ${isLogin ? 'Se connecter' : 'Créer mon compte'}
+        </button>
+        <p class="muted mt-1" style="text-align:center;font-size:0.8rem">
+          Chaque exploitation est isolée : seul toi (et tes membres) voyez vos données.
+        </p>
+      </div>
+    </div>`;
+  content().querySelectorAll('[data-auth]').forEach((b) => {
+    b.onclick = () => { authMode = b.dataset.auth; renderAuth(); };
+  });
+  content().querySelector('#auth-submit').onclick = async () => {
+    const email = content().querySelector('#auth-email').value.trim();
+    const password = content().querySelector('#auth-pass').value;
+    if (!email || password.length < 6) {
+      toast('E-mail et mot de passe (6+ caractères) requis', true);
+      return;
+    }
+    renderBoot('Connexion…');
+    try {
+      if (isLogin) await signIn(email, password);
+      else {
+        const res = await signUp(email, password);
+        if (!res.session) {
+          toast('Compte créé — vérifie ton e-mail si la confirmation est activée');
+          authMode = 'login';
+          renderAuth('Compte créé. Connecte-toi.');
+          return;
+        }
+      }
+      await bootApp();
+    } catch (err) {
+      renderAuth(err.message || 'Échec de connexion');
+    }
+  };
+}
+
+function renderCreateFarm() {
+  setAppShell(false);
+  content().innerHTML = `
+    <div class="auth-screen">
+      <div class="auth-card">
+        <div class="auth-logo">🏡</div>
+        <h2>Créer mon exploitation</h2>
+        <p class="lead">Premier pas : donne un nom à ta ferme ou ton jardin. Tes données resteront privées.</p>
+        <div class="form-group"><label>Nom de l'exploitation</label>
+          <input type="text" id="farm-name" placeholder="Ex. Jardin de Cayenne" /></div>
+        <button type="button" class="btn btn-primary btn-lg" id="farm-create">Créer et continuer</button>
+        <button type="button" class="btn btn-ghost btn-block mt-1" id="farm-logout">Se déconnecter</button>
+      </div>
+    </div>`;
+  content().querySelector('#farm-create').onclick = async () => {
+    const name = content().querySelector('#farm-name').value.trim();
+    if (!name) { toast('Indique un nom', true); return; }
+    renderBoot('Création de l\'exploitation…');
+    try {
+      farm = await createFarm(name, session.user.id);
+      state = await loadFarmState(farm.id);
+      toast(`Bienvenue sur « ${farm.name} »`);
+      enterApp();
+    } catch (err) {
+      toast(err.message || 'Erreur', true);
+      renderCreateFarm();
+    }
+  };
+  content().querySelector('#farm-logout').onclick = async () => {
+    await signOut();
+    session = null;
+    farm = null;
+    renderAuth();
+  };
+}
+
+async function bootApp() {
+  if (!supabaseConfigured) {
+    renderConfigMissing();
+    return;
+  }
+  renderBoot('Chargement…');
+  try {
+    session = await getSession();
+    if (!session) {
+      renderAuth();
+      return;
+    }
+    const farms = await listUserFarms();
+    if (!farms.length) {
+      renderCreateFarm();
+      return;
+    }
+    farm = farms[0];
+    state = await loadFarmState(farm.id);
+    enterApp();
+  } catch (err) {
+    console.error(err);
+    renderAuth(err.message || 'Impossible de charger la session');
+  }
+}
+
+function enterApp() {
+  setAppShell(true);
+  tab = 'accueil';
+  plusView = null;
+  render();
+  maybeShowWelcome();
 }
 
 function toast(msg, isError = false) {
@@ -134,13 +314,13 @@ function maybeShowWelcome() {
   root.querySelector('#welcome-ok').onclick = () => {
     localStorage.setItem('guyane-welcome-seen', '1');
     root.remove();
-    toast('Des exemples sont déjà là pour découvrir');
+    toast('Tes données restent synchronisées entre appareils');
   };
 }
 
 /* ——— Accueil ——— */
 function renderAccueil() {
-  headerSub().textContent = 'Mon jardin';
+  headerSub().textContent = farm?.name || 'Mon jardin';
   const season = getGuyaneSeason();
   const actifs = state.cultures.filter((c) => c.status === 'actif');
   const libres = state.parcels.filter((p) => p.status === 'libre').length;
@@ -446,10 +626,12 @@ function openCultureWizard(startPhase) {
             const dates = startPhase === 'nursery'
               ? calcCultureDates(crop, start, null)
               : calcCultureDates(crop, null, start);
+            const nurseryId = dates.nurseryStart ? uid('n') : null;
             const culture = {
               id: uid('c'),
               parcelId: draft.parcelId,
               cropId: draft.cropId,
+              nurseryId,
               phase: startPhase,
               plantsCount: plants,
               surfaceUsed: surf ? Number(surf) : null,
@@ -747,7 +929,7 @@ function renderPlus() {
       </button>
     </div>
     <p class="muted mt-1" style="font-size:0.75rem;text-align:center">
-      <!-- TODO: météo API · bot Discord · sync multi-utilisateurs · export PDF -->
+      Cloud · ${farm?.name || ''} · ${session?.user?.email || ''}
     </p>
   `;
   content().querySelectorAll('[data-v]').forEach((b) => {
@@ -1245,16 +1427,28 @@ function renderEchecs() {
 /* Réglages */
 function renderReglages() {
   headerSub().textContent = 'Réglages';
+  const email = session?.user?.email || '—';
+  const farmName = farm?.name || '—';
   content().innerHTML = `
     <div class="page-title">${backPlusBtn()}<span>Réglages</span></div>
     <div class="card">
-      <h3>Sauvegarder mes données</h3>
-      <p class="card-meta mb-1">Télécharge une copie de tout ton jardin (fichier sur ton téléphone).</p>
+      <h3>Compte cloud</h3>
+      <p class="card-meta mb-1">
+        Connecté : <strong>${email}</strong><br>
+        Exploitation : <strong>${farmName}</strong><br>
+        Tes données sont synchronisées — même progression sur téléphone, tablette et PC.
+      </p>
+      <button type="button" class="btn btn-secondary btn-block" id="btn-reload">Rafraîchir depuis le cloud</button>
+      <button type="button" class="btn btn-danger btn-block mt-1" id="btn-logout">Se déconnecter</button>
+    </div>
+    <div class="card">
+      <h3>Sauvegarder (fichier)</h3>
+      <p class="card-meta mb-1">Copie locale de secours (JSON).</p>
       <button type="button" class="btn btn-primary btn-block" id="btn-export">Télécharger la sauvegarde</button>
     </div>
     <div class="card">
       <h3>Restaurer une sauvegarde</h3>
-      <p class="card-meta mb-1">Remplace les données actuelles par un fichier sauvegardé.</p>
+      <p class="card-meta mb-1">Remplace les données cloud de cette exploitation.</p>
       <input type="file" id="import-file" accept="application/json,.json" hidden />
       <button type="button" class="btn btn-secondary btn-block" id="btn-import">Choisir un fichier…</button>
     </div>
@@ -1263,16 +1457,32 @@ function renderReglages() {
       <button type="button" class="btn btn-secondary btn-block" id="btn-welcome">Afficher le guide de démarrage</button>
     </div>
     <div class="card">
-      <h3>Remettre les exemples</h3>
-      <p class="card-meta mb-1">Efface tout et recharge les données d’exemple.</p>
-      <button type="button" class="btn btn-danger btn-block" id="btn-reset">Réinitialiser l’application</button>
+      <h3>Vider l’exploitation</h3>
+      <p class="card-meta mb-1">Efface parcelles et cultures ; conserve le catalogue de plantes de base.</p>
+      <button type="button" class="btn btn-danger btn-block" id="btn-reset">Réinitialiser les données</button>
     </div>
     <p class="muted" style="font-size:0.75rem;text-align:center;margin-top:1rem">
-      Guyane Cultures v1 · données stockées sur cet appareil<br>
-      <!-- TODO: météo API · bot Discord · sync multi-utilisateurs · export PDF -->
+      Guyane Cultures v2 · sync Supabase multi-appareils<br>
+      Isolation par exploitation (RLS)
     </p>
   `;
   bindBackPlus();
+  content().querySelector('#btn-reload').onclick = async () => {
+    try {
+      state = await loadFarmState(farm.id);
+      toast('Données à jour');
+      render();
+    } catch (err) {
+      toast(err.message || 'Erreur', true);
+    }
+  };
+  content().querySelector('#btn-logout').onclick = async () => {
+    await signOut();
+    session = null;
+    farm = null;
+    state = emptyState();
+    renderAuth();
+  };
   content().querySelector('#btn-export').onclick = () => {
     const blob = new Blob([exportJSON(state)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -1288,11 +1498,12 @@ function renderReglages() {
     if (!file) return;
     try {
       const text = await file.text();
-      state = importJSON(text);
-      toast('Données restaurées');
+      state = parseImportJSON(text);
+      await persist();
+      toast('Données restaurées dans le cloud');
       render();
     } catch (err) {
-      toast('Fichier invalide', true);
+      toast(err.message || 'Fichier invalide', true);
     }
   };
   content().querySelector('#btn-welcome').onclick = () => {
@@ -1302,16 +1513,20 @@ function renderReglages() {
   content().querySelector('#btn-reset').onclick = () => {
     confirmAction({
       title: 'Tout effacer ?',
-      message: 'Tes parcelles et cultures actuelles seront remplacées par les exemples de démonstration.',
+      message: 'Parcelles, cultures et stocks de cette exploitation seront effacés dans le cloud. Le catalogue de plantes de base sera rechargé.',
       confirmLabel: 'Oui, réinitialiser',
-      onConfirm: () => {
-        state = resetToSeed();
-        localStorage.removeItem('guyane-welcome-seen');
-        toast('Exemples rechargés');
-        plusView = null;
-        tab = 'accueil';
-        render();
-        maybeShowWelcome();
+      onConfirm: async () => {
+        try {
+          state = await resetFarmToCatalog(farm.id);
+          localStorage.removeItem('guyane-welcome-seen');
+          toast('Exploitation réinitialisée');
+          plusView = null;
+          tab = 'accueil';
+          render();
+          maybeShowWelcome();
+        } catch (err) {
+          toast(err.message || 'Erreur', true);
+        }
       },
     });
   };
@@ -1339,5 +1554,16 @@ function initNav() {
 }
 
 initNav();
-render();
-maybeShowWelcome();
+
+if (supabase) {
+  supabase.auth.onAuthStateChange(async (event) => {
+    if (event === 'SIGNED_OUT') {
+      session = null;
+      farm = null;
+      state = emptyState();
+      renderAuth();
+    }
+  });
+}
+
+bootApp();
