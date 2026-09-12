@@ -256,3 +256,8 @@ begin
     );
   end loop;
 end $$;
+
+-- Lock down SECURITY DEFINER helpers (not callable by anon)
+revoke all on function public.handle_new_farm() from public, anon, authenticated;
+revoke all on function public.is_farm_member(uuid) from public, anon;
+grant execute on function public.is_farm_member(uuid) to authenticated;
